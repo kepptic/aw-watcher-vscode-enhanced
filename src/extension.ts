@@ -221,6 +221,22 @@ class ActivityWatch {
       return;
     }
 
+    // Only send heartbeats from the focused VS Code window.
+    // Multiple windows share the same bucket — unfocused windows
+    // interleave different project data and break pulse merging.
+    // Exception: onDidChangeWindowState fires on blur, so we allow
+    // one heartbeat when focus is lost to close the current event.
+    const isFocused = window.state.focused;
+    if (!isFocused && this._lastHeartbeatTime > 0) {
+      // Already sent at least one heartbeat — skip unfocused events
+      // unless this is the blur transition itself (detected by
+      // checking if we were recently focused)
+      const timeSinceLast = new Date().getTime() - this._lastHeartbeatTime;
+      if (timeSinceLast > 2000) {
+        return;
+      }
+    }
+
     try {
       const heartbeat = await this._createHeartbeat();
       const filePath = heartbeat.data.file || "";
