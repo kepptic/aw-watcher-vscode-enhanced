@@ -29,6 +29,38 @@ export function activate(context: ExtensionContext) {
     controller.init()
   );
   context.subscriptions.push(reloadCommand);
+
+  const statusCommand = commands.registerCommand(
+    "aw-watcher-vscode.showMenu",
+    async () => {
+      const pick = await window.showQuickPick(
+        [
+          {
+            label: "$(refresh) Reconnect to ActivityWatch",
+            description: "Retry server connection",
+            action: "reload",
+          },
+          {
+            label: "$(globe) Open ActivityWatch Dashboard",
+            description: "http://localhost:5600",
+            action: "dashboard",
+          },
+          {
+            label: `$(info) Status: ${controller.getStatus()}`,
+            description: `${controller.getHeartbeatCount()} heartbeats sent`,
+            action: "none",
+          },
+        ],
+        { placeHolder: "ActivityWatch Enhanced" }
+      );
+      if (pick?.action === "reload") {
+        controller.init();
+      } else if (pick?.action === "dashboard") {
+        env.openExternal(Uri.parse("http://localhost:5600"));
+      }
+    }
+  );
+  context.subscriptions.push(statusCommand);
 }
 
 class ActivityWatch {
@@ -72,7 +104,7 @@ class ActivityWatch {
 
     // Status bar indicator (right side, low priority so it doesn't crowd)
     this._statusBar = window.createStatusBarItem(StatusBarAlignment.Right, 10);
-    this._statusBar.command = "extension.reload";
+    this._statusBar.command = "aw-watcher-vscode.showMenu";
     this._updateStatusBar("connecting");
     this._statusBar.show();
 
@@ -169,6 +201,16 @@ class ActivityWatch {
     if (maxHeartbeatsPerSec) {
       this._maxHeartbeatsPerSec = maxHeartbeatsPerSec;
     }
+  }
+
+  public getStatus(): string {
+    if (!this._bucketCreated) return "Disconnected";
+    if (!window.state.focused) return "Paused (unfocused)";
+    return "Tracking";
+  }
+
+  public getHeartbeatCount(): number {
+    return this._heartbeatCount;
   }
 
   public dispose() {
