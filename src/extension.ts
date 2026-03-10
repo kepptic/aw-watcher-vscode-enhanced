@@ -1,7 +1,10 @@
 import {
   Disposable,
   ExtensionContext,
+  StatusBarAlignment,
+  StatusBarItem,
   Terminal,
+  ThemeColor,
   commands,
   window,
   workspace,
@@ -32,6 +35,8 @@ class ActivityWatch {
   private _disposable: Disposable;
   private _client: AWClient;
   private _git: API | undefined;
+  private _statusBar: StatusBarItem;
+  private _heartbeatCount: number = 0;
 
   private _bucket: {
     id: string;
@@ -64,6 +69,12 @@ class ActivityWatch {
     };
     this._bucket.id = `${this._bucket.clientName}_${this._bucket.hostName}`;
     this._client = new AWClient(this._bucket.clientName, { testing: false });
+
+    // Status bar indicator (right side, low priority so it doesn't crowd)
+    this._statusBar = window.createStatusBarItem(StatusBarAlignment.Right, 10);
+    this._statusBar.command = "extension.reload";
+    this._updateStatusBar("connecting");
+    this._statusBar.show();
 
     const subscriptions: Disposable[] = [];
 
@@ -118,6 +129,7 @@ class ActivityWatch {
             : "[ActivityWatch Enhanced] Created bucket"
         );
         this._bucketCreated = true;
+        this._updateStatusBar("active");
       })
       .catch((err) => {
         this._handleError(
@@ -125,6 +137,7 @@ class ActivityWatch {
           true
         );
         this._bucketCreated = false;
+        this._updateStatusBar("error");
         console.error(err);
       });
 
@@ -159,7 +172,46 @@ class ActivityWatch {
   }
 
   public dispose() {
+    this._statusBar.dispose();
     this._disposable.dispose();
+  }
+
+  private _updateStatusBar(
+    state: "connecting" | "active" | "heartbeat" | "error" | "unfocused"
+  ) {
+    switch (state) {
+      case "connecting":
+        this._statusBar.text = "$(sync~spin) AW";
+        this._statusBar.tooltip = "ActivityWatch: Connecting to server...";
+        this._statusBar.backgroundColor = undefined;
+        break;
+      case "active":
+        this._statusBar.text = "$(eye) AW";
+        this._statusBar.tooltip = `ActivityWatch: Tracking (${this._heartbeatCount} heartbeats)`;
+        this._statusBar.backgroundColor = undefined;
+        break;
+      case "heartbeat":
+        this._heartbeatCount++;
+        this._statusBar.text = "$(pulse) AW";
+        this._statusBar.tooltip = `ActivityWatch: Tracking (${this._heartbeatCount} heartbeats)`;
+        this._statusBar.backgroundColor = undefined;
+        // Flash back to eye icon after 500ms
+        setTimeout(() => this._updateStatusBar("active"), 500);
+        break;
+      case "error":
+        this._statusBar.text = "$(warning) AW";
+        this._statusBar.tooltip =
+          "ActivityWatch: Server not responding. Click to retry.";
+        this._statusBar.backgroundColor = new ThemeColor(
+          "statusBarItem.warningBackground"
+        );
+        break;
+      case "unfocused":
+        this._statusBar.text = "$(eye-closed) AW";
+        this._statusBar.tooltip = `ActivityWatch: Paused (window unfocused, ${this._heartbeatCount} heartbeats)`;
+        this._statusBar.backgroundColor = undefined;
+        break;
+    }
   }
 
   // Resolve cwd for a terminal PID via lsof (macOS/Linux).
@@ -251,6 +303,7 @@ class ActivityWatch {
     if (!isFocused && this._lastHeartbeatTime > 0) {
       const timeSinceLast = new Date().getTime() - this._lastHeartbeatTime;
       if (timeSinceLast > 2000) {
+        this._updateStatusBar("unfocused");
         return;
       }
     }
@@ -279,11 +332,13 @@ class ActivityWatch {
   private _sendHeartbeat(event: IAppEditorEvent) {
     return this._client
       .heartbeat(this._bucket.id, this._pulseTime, event)
-      .then(() =>
-        console.log("[ActivityWatch Enhanced] Heartbeat:", event.data.file)
-      )
+      .then(() => {
+        console.log("[ActivityWatch Enhanced] Heartbeat:", event.data.file);
+        this._updateStatusBar("heartbeat");
+      })
       .catch(({ err }: { err: unknown }) => {
         console.error("[ActivityWatch Enhanced] Heartbeat error:", err);
+        this._updateStatusBar("error");
       });
   }
 
