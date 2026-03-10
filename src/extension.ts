@@ -1,10 +1,12 @@
 import {
   Disposable,
   ExtensionContext,
+  Terminal,
   commands,
   window,
   workspace,
   debug,
+  env,
   Uri,
   Extension,
   extensions,
@@ -14,13 +16,8 @@ import { hostname } from "os";
 import { API, GitExtension, Repository } from "./git";
 import { basename, relative } from "path";
 
-// The vscode type declarations in this project are old (1.x).
-// Terminal APIs (activeTerminal, terminals, onDidChangeActiveTerminal, onDidOpenTerminal)
-// exist at runtime in VS Code 1.37+. We cast through `any` where needed.
-const win = window as any;
-
 export function activate(context: ExtensionContext) {
-  console.log("[ActivityWatch] Extension activated");
+  console.log("[ActivityWatch Enhanced] Extension activated");
   const controller = new ActivityWatch();
   controller.init();
   context.subscriptions.push(controller);
@@ -68,20 +65,19 @@ class ActivityWatch {
     this._bucket.id = `${this._bucket.clientName}_${this._bucket.hostName}`;
     this._client = new AWClient(this._bucket.clientName, { testing: false });
 
-    // Subscribe to all relevant VS Code events
     const subscriptions: Disposable[] = [];
 
     // Editor events
     window.onDidChangeTextEditorSelection(this._onEvent, this, subscriptions);
     window.onDidChangeActiveTextEditor(this._onEvent, this, subscriptions);
 
-    // Terminal events (APIs exist in VS Code 1.37+, types are old)
-    if (win.onDidChangeActiveTerminal) {
-      win.onDidChangeActiveTerminal(this._onTerminalEvent, this, subscriptions);
-    }
-    if (win.onDidOpenTerminal) {
-      win.onDidOpenTerminal(this._onTerminalEvent, this, subscriptions);
-    }
+    // Terminal events
+    window.onDidChangeActiveTerminal(
+      this._onTerminalEvent,
+      this,
+      subscriptions
+    );
+    window.onDidOpenTerminal(this._onTerminalEvent, this, subscriptions);
     window.onDidCloseTerminal(this._onTerminalEvent, this, subscriptions);
 
     // Debug events
@@ -118,8 +114,8 @@ class ActivityWatch {
       .then((res) => {
         console.log(
           res.alreadyExist
-            ? "[ActivityWatch] Bucket already exists"
-            : "[ActivityWatch] Created bucket"
+            ? "[ActivityWatch Enhanced] Bucket already exists"
+            : "[ActivityWatch Enhanced] Created bucket"
         );
         this._bucketCreated = true;
       })
@@ -149,7 +145,7 @@ class ActivityWatch {
         : await extension.activate();
       return gitExtension.getAPI(1);
     } catch (_err) {
-      console.warn("[ActivityWatch] Git extension not available");
+      console.warn("[ActivityWatch Enhanced] Git extension not available");
       return undefined;
     }
   }
@@ -166,32 +162,60 @@ class ActivityWatch {
     this._disposable.dispose();
   }
 
-  /// Resolve cwd for a terminal PID via lsof.
-  /// The terminal's processId is its shell PID — lsof on it gives the cwd directly.
-  /// Returns cached result if fresh enough (10s TTL).
+  // Resolve cwd for a terminal PID via lsof (macOS/Linux).
+  // The terminal's processId is its shell PID — lsof gives the cwd directly.
+  // Returns cached result if fresh enough (10s TTL).
   private _getTerminalCwd(pid: number): string {
     const cached = this._pidCwdCache.get(pid);
     const now = Date.now();
-    if (cached && (now - cached.time) < 10000) {
+    if (cached && now - cached.time < 10000) {
       return cached.cwd;
     }
 
     try {
       const { execFileSync } = require("child_process");
-      const lsofOut: string = execFileSync("lsof", ["-p", String(pid), "-Fn"], {
-        timeout: 2000, encoding: "utf-8"
-      });
-      const lines = lsofOut.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i] === "fcwd" && i + 1 < lines.length && lines[i+1].startsWith("n")) {
-          const cwd = lines[i+1].substring(1);
-          if (cwd && cwd !== "/" && !cwd.startsWith("/dev")) {
-            this._pidCwdCache.set(pid, { cwd, time: now });
-            return cwd;
+
+      if (process.platform === "win32") {
+        // Windows: use PowerShell to get process working directory
+        const out: string = execFileSync(
+          "powershell",
+          [
+            "-NoProfile",
+            "-Command",
+            `(Get-Process -Id ${pid}).Path | Split-Path`,
+          ],
+          { timeout: 2000, encoding: "utf-8" }
+        );
+        const cwd = out.trim();
+        if (cwd) {
+          this._pidCwdCache.set(pid, { cwd, time: now });
+          return cwd;
+        }
+      } else {
+        // macOS/Linux: use lsof
+        const lsofOut: string = execFileSync(
+          "lsof",
+          ["-p", String(pid), "-Fn"],
+          { timeout: 2000, encoding: "utf-8" }
+        );
+        const lines = lsofOut.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (
+            lines[i] === "fcwd" &&
+            i + 1 < lines.length &&
+            lines[i + 1].startsWith("n")
+          ) {
+            const cwd = lines[i + 1].substring(1);
+            if (cwd && cwd !== "/" && !cwd.startsWith("/dev")) {
+              this._pidCwdCache.set(pid, { cwd, time: now });
+              return cwd;
+            }
           }
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      /* ignore */
+    }
 
     return "";
   }
@@ -201,13 +225,12 @@ class ActivityWatch {
       return;
     }
 
-    const terminal = win.activeTerminal;
+    const terminal = window.activeTerminal;
     if (!terminal) return;
 
-    // Use terminal object identity via index in terminals array to
-    // distinguish between terminals with the same name (e.g., multiple "2.1.69")
-    const terminals = win.terminals || [];
-    const termIndex = Array.prototype.indexOf.call(terminals, terminal);
+    // Use terminal object identity via index to distinguish same-named terminals
+    const terminals = window.terminals;
+    const termIndex = terminals.indexOf(terminal);
     const termKey = `${terminal.name || ""}|${termIndex}`;
 
     if (termKey !== this._lastTerminalName) {
@@ -224,13 +247,8 @@ class ActivityWatch {
     // Only send heartbeats from the focused VS Code window.
     // Multiple windows share the same bucket — unfocused windows
     // interleave different project data and break pulse merging.
-    // Exception: onDidChangeWindowState fires on blur, so we allow
-    // one heartbeat when focus is lost to close the current event.
     const isFocused = window.state.focused;
     if (!isFocused && this._lastHeartbeatTime > 0) {
-      // Already sent at least one heartbeat — skip unfocused events
-      // unless this is the blur transition itself (detected by
-      // checking if we were recently focused)
       const timeSinceLast = new Date().getTime() - this._lastHeartbeatTime;
       if (timeSinceLast > 2000) {
         return;
@@ -253,17 +271,19 @@ class ActivityWatch {
         this._lastHeartbeatTime = curTime;
         this._sendHeartbeat(heartbeat);
       }
-    } catch (err: any) {
-      this._handleError(err);
+    } catch (err: unknown) {
+      this._handleError(String(err));
     }
   }
 
   private _sendHeartbeat(event: IAppEditorEvent) {
     return this._client
       .heartbeat(this._bucket.id, this._pulseTime, event)
-      .then(() => console.log("[ActivityWatch] Heartbeat:", event.data.file))
-      .catch(({ err }: { err: any }) => {
-        console.error("[ActivityWatch] Heartbeat error:", err);
+      .then(() =>
+        console.log("[ActivityWatch Enhanced] Heartbeat:", event.data.file)
+      )
+      .catch(({ err }: { err: unknown }) => {
+        console.error("[ActivityWatch Enhanced] Heartbeat error:", err);
       });
   }
 
@@ -274,14 +294,22 @@ class ActivityWatch {
     const filePath = this._getFilePath();
     const branch = this._getCurrentBranch() || "unknown";
 
-    const data: { [k: string]: any } = {
+    const data: Record<string, unknown> = {
       language: this._getFileLanguage() || "unknown",
       project: projectName || "unknown",
       file: filePath || "unknown",
       branch: branch,
+      // PR #39: editor identification (dynamic, supports Cursor/Windsurf/etc.)
+      editor: env.appName || "VS Code",
     };
 
-    // Relative file path (cleaner than absolute)
+    // PR #36: workspace name (from .code-workspace file)
+    const wsName = workspace.name;
+    if (wsName) {
+      data.workspace = wsName;
+    }
+
+    // Relative file path
     if (filePath && projectPath) {
       const relPath = relative(projectPath, filePath);
       if (relPath && !relPath.startsWith("..")) {
@@ -290,7 +318,7 @@ class ActivityWatch {
     }
 
     // Cursor position
-    if (editor && editor.selection) {
+    if (editor?.selection) {
       data.cursor_line = editor.selection.active.line + 1;
       data.cursor_col = editor.selection.active.character + 1;
       data.lines_in_file = editor.document.lineCount;
@@ -316,78 +344,40 @@ class ActivityWatch {
       }
     }
 
-    // Open editors (just filenames for context)
+    // Open editors
     const openEditors = this._getOpenEditorFiles();
     if (openEditors.length > 0) {
       data.open_files = openEditors.join(";");
       data.open_file_count = openEditors.length;
     }
 
-    // Active terminal info
-    const terminal = win.activeTerminal;
+    // Active terminal
+    const terminal = window.activeTerminal;
     if (terminal) {
       data.active_terminal = terminal.name;
-
-      // Resolve cwd: try shellIntegration first, then PID-based lsof fallback
-      let termCwd = "";
-      try {
-        if (terminal.shellIntegration && terminal.shellIntegration.cwd) {
-          const cwd = terminal.shellIntegration.cwd;
-          termCwd = typeof cwd === 'string' ? cwd : (cwd.fsPath || cwd.path || "");
-        }
-      } catch (_) {}
-
-      // Fallback: resolve cwd from terminal PID via lsof
-      if (!termCwd && terminal.processId) {
-        try {
-          const pid = await Promise.race([
-            terminal.processId,
-            new Promise<undefined>(r => setTimeout(r, 500))
-          ]);
-          if (pid) {
-            termCwd = this._getTerminalCwd(pid);
-          }
-        } catch (_) {}
-      }
-
+      const termCwd = await this._resolveTerminalCwd(terminal);
       if (termCwd) {
         data.terminal_cwd = termCwd;
-        const desc = termCwd.split("/").pop() || termCwd.split("\\").pop() || "";
+        const desc =
+          termCwd.split("/").pop() || termCwd.split("\\").pop() || "";
         if (desc) {
           data.terminal_description = desc;
           data.active_terminal_label = `${terminal.name} ${desc}`;
         }
       }
     }
-    data.terminal_count = win.terminals?.length || 0;
+    data.terminal_count = window.terminals.length;
 
-    // All terminal labels (name + cwd project) for context
-    if (win.terminals && win.terminals.length > 0) {
+    // All terminal labels
+    if (window.terminals.length > 0) {
       const termLabels: string[] = [];
-      for (const t of win.terminals) {
+      for (const t of window.terminals) {
         const name = t.name || "";
         let label = name;
-        // Try shellIntegration cwd, then PID fallback
-        let cwdStr = "";
-        try {
-          if (t.shellIntegration && t.shellIntegration.cwd) {
-            const cwd = t.shellIntegration.cwd;
-            cwdStr = typeof cwd === 'string' ? cwd : (cwd.fsPath || cwd.path || "");
-          }
-        } catch (_) {}
-        if (!cwdStr && t.processId) {
-          try {
-            const pid = await Promise.race([
-              t.processId,
-              new Promise<undefined>(r => setTimeout(r, 500))
-            ]);
-            if (pid) {
-              cwdStr = this._getTerminalCwd(pid);
-            }
-          } catch (_) {}
-        }
+        const cwdStr = await this._resolveTerminalCwd(t);
         if (cwdStr) {
-          const dirName = cwdStr.split("/").pop() || cwdStr.split("\\").pop() || "";
+          const dirName =
+            cwdStr.split("/").pop() || cwdStr.split("\\").pop() || "";
           if (dirName) label = `${name} ${dirName}`;
         }
         if (label) termLabels.push(label);
@@ -400,37 +390,64 @@ class ActivityWatch {
     // Window focus state
     data.is_focused = window.state.focused;
 
-    // Workspace folder count (multi-root)
+    // Workspace folders (multi-root)
     const folders = workspace.workspaceFolders;
     if (folders && folders.length > 1) {
-      data.workspace_folders = folders.map((f: any) => f.name).join(";");
+      data.workspace_folders = folders.map((f) => f.name).join(";");
     }
 
     return {
       timestamp: new Date(),
       duration: 0,
-      data: data as any,
+      data: data as IAppEditorEvent["data"],
     };
+  }
+
+  private async _resolveTerminalCwd(terminal: Terminal): Promise<string> {
+    // Try shellIntegration first (VS Code 1.93+)
+    try {
+      const si = (terminal as unknown as Record<string, unknown>).shellIntegration as
+        | { cwd?: string | { fsPath?: string; path?: string } }
+        | undefined;
+      if (si?.cwd) {
+        const cwd = si.cwd;
+        const cwdStr =
+          typeof cwd === "string" ? cwd : cwd.fsPath || cwd.path || "";
+        if (cwdStr) return cwdStr;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    // Fallback: resolve cwd from terminal PID
+    if (terminal.processId) {
+      try {
+        const pid = await Promise.race([
+          terminal.processId,
+          new Promise<number | undefined>((r) => setTimeout(() => r(undefined), 500)),
+        ]);
+        if (pid) {
+          return this._getTerminalCwd(pid);
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    return "";
   }
 
   private _getProjectName(): string | undefined {
     const fileUri = this._getActiveFileUri();
     if (!fileUri) {
-      // Fall back to first workspace folder
       const folders = workspace.workspaceFolders;
       if (folders && folders.length > 0) {
         return folders[0].name;
       }
       return undefined;
     }
-
     const workspaceFolder = workspace.getWorkspaceFolder(fileUri);
-    if (!workspaceFolder) {
-      return undefined;
-    }
-
-    // Return just the folder name, not the full path
-    return workspaceFolder.name;
+    return workspaceFolder?.name;
   }
 
   private _getProjectFolder(): string | undefined {
@@ -443,34 +460,19 @@ class ActivityWatch {
       return undefined;
     }
     const workspaceFolder = workspace.getWorkspaceFolder(fileUri);
-    if (!workspaceFolder) {
-      return undefined;
-    }
-    return workspaceFolder.uri.fsPath;
+    return workspaceFolder?.uri.fsPath;
   }
 
   private _getActiveFileUri(): Uri | undefined {
-    const editor = window.activeTextEditor;
-    if (!editor) {
-      return undefined;
-    }
-    return editor.document.uri;
+    return window.activeTextEditor?.document.uri;
   }
 
   private _getFilePath(): string | undefined {
-    const editor = window.activeTextEditor;
-    if (!editor) {
-      return undefined;
-    }
-    return editor.document.fileName;
+    return window.activeTextEditor?.document.fileName;
   }
 
   private _getFileLanguage(): string | undefined {
-    const editor = window.activeTextEditor;
-    if (!editor) {
-      return undefined;
-    }
-    return editor.document.languageId;
+    return window.activeTextEditor?.document.languageId;
   }
 
   private _getCurrentBranch(): string | undefined {
@@ -478,7 +480,6 @@ class ActivityWatch {
       return undefined;
     }
 
-    // Find the repository for the active file
     const fileUri = this._getActiveFileUri();
     if (fileUri && this._git.getRepository) {
       const repo = this._git.getRepository(fileUri);
@@ -487,7 +488,6 @@ class ActivityWatch {
       }
     }
 
-    // Fall back to first repository
     return this._git.repositories[0]?.state?.HEAD?.name;
   }
 
@@ -507,28 +507,20 @@ class ActivityWatch {
     if (!repo) {
       repo = this._git.repositories[0];
     }
-
     if (!repo) {
       return null;
     }
 
     const result: { dirty_count?: number; remote_url?: string } = {};
-
-    // Count dirty files
     const state = repo.state;
     result.dirty_count =
       (state.workingTreeChanges?.length || 0) +
       (state.indexChanges?.length || 0);
 
-    // Get remote URL
     const origin = state.remotes?.find((r) => r.name === "origin");
     if (origin?.fetchUrl) {
-      // Clean up the URL (remove credentials, simplify)
       let url = origin.fetchUrl;
-      // Convert git@github.com:org/repo.git to github.com/org/repo
-      const sshMatch = url.match(
-        /git@([^:]+):(.+?)(?:\.git)?$/
-      );
+      const sshMatch = url.match(/git@([^:]+):(.+?)(?:\.git)?$/);
       if (sshMatch) {
         url = `${sshMatch[1]}/${sshMatch[2]}`;
       }
@@ -551,10 +543,10 @@ class ActivityWatch {
 
   private _handleError(err: string, isCritical = false): undefined {
     if (isCritical) {
-      console.error("[ActivityWatch]", err);
-      window.showErrorMessage(`[ActivityWatch] ${err}`);
+      console.error("[ActivityWatch Enhanced]", err);
+      window.showErrorMessage(`[ActivityWatch Enhanced] ${err}`);
     } else {
-      console.warn("[ActivityWatch]", err);
+      console.warn("[ActivityWatch Enhanced]", err);
     }
     return;
   }

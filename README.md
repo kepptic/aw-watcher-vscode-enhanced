@@ -1,93 +1,109 @@
-# aw-watcher-vscode
+# ActivityWatch VS Code Enhanced
 
-This extension allows [ActivityWatch](https://activitywatch.net), the free and open-source time tracker, to keep track of the projects and programming languages you use in VS Code.
+An enhanced VS Code extension for [ActivityWatch](https://activitywatch.net/) — tracks files, terminals, git state, debugging sessions, and more.
 
-The extension is published on [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=activitywatch.aw-watcher-vscode) and [Open VSX](https://open-vsx.org/extension/ActivityWatch/aw-watcher-vscode).
+## Fork Notice
 
-The source code is available at https://github.com/ActivityWatch/aw-watcher-vscode
+This is an enhanced fork of [ActivityWatch/aw-watcher-vscode](https://github.com/ActivityWatch/aw-watcher-vscode), which has been inactive since May 2023. We forked to:
+
+- **Merge community contributions** that had been waiting for review (PRs #36, #39, #40)
+- **Add rich terminal context** — cwd resolution, terminal enumeration, switch detection
+- **Fix multi-window issues** — only the focused window sends heartbeats, preventing broken pulse merge
+- **Modernize the codebase** — TypeScript 5.x, ESLint, updated dependencies, proper VS Code types
+- **Cross-platform terminal cwd** — macOS/Linux via `lsof`, Windows via PowerShell
+
+Full credit to the original [ActivityWatch](https://github.com/ActivityWatch) team and contributors. Licensed under the same [MPL-2.0](LICENSE.txt) license.
 
 ## Features
 
-Sends following data to ActivityWatch:
-- current project name
-- programming language
-- current file name
-- current Git branch
+| Feature | Original | Enhanced |
+|---------|----------|----------|
+| File tracking (language, path) | Yes | Yes |
+| Git branch | Yes | Yes |
+| Git dirty count, remote URL | - | Yes |
+| Cursor position (line/col) | - | Yes |
+| Debug session tracking | - | Yes |
+| Terminal name & cwd | - | Yes |
+| Terminal switch detection | - | Yes |
+| All terminal enumeration | - | Yes |
+| Editor identification | - | Yes (Cursor, Windsurf, etc.) |
+| Workspace name | - | Yes |
+| Multi-window focus safety | - | Yes |
+| Untrusted workspace support | - | Yes |
+| Relative file paths | - | Yes |
+| Open editor tabs | - | Yes |
 
-Currently VS Code extensions don't support getting file/project names for non-editable files, therefore this results in the value "unknown" for those properties. (For instance when opening logo.png this happens)
+## Heartbeat Data
+
+Each heartbeat includes:
+
+```json
+{
+  "language": "typescript",
+  "project": "my-project",
+  "file": "/path/to/file.ts",
+  "relative_path": "src/file.ts",
+  "branch": "main",
+  "editor": "Visual Studio Code",
+  "workspace": "My Workspace",
+  "cursor_line": 42,
+  "cursor_col": 10,
+  "lines_in_file": 200,
+  "git_dirty_count": 3,
+  "git_remote": "github.com/org/repo",
+  "is_debugging": false,
+  "debug_type": "node",
+  "active_terminal": "zsh",
+  "terminal_cwd": "/home/user/project",
+  "terminal_description": "project",
+  "terminal_count": 3,
+  "terminal_names": "zsh project;node server;bash deploy",
+  "is_focused": true,
+  "open_files": "file.ts;index.ts",
+  "open_file_count": 2
+}
+```
+
+## Installation
+
+### From Source
+
+```bash
+git clone https://github.com/kepptic/aw-watcher-vscode-enhanced.git
+cd aw-watcher-vscode-enhanced
+npm install
+npm run compile
+```
+
+Then copy the extension to your VS Code extensions directory or use `vsce package` to create a `.vsix`.
+
+### Configuration
+
+In VS Code settings:
+
+```json
+{
+  "aw-watcher-vscode.maxHeartbeatsPerSec": 1
+}
+```
 
 ## Requirements
 
-This extension requires ActivityWatch to be running on your machine.
+- VS Code 1.75+
+- [ActivityWatch](https://activitywatch.net/) running on `localhost:5600`
 
-## Install Instructions
+## Multi-Window Behavior
 
-To install this extension, search for aw-watcher-vscode in the Extensions sidebar in VS Code, and install the one with ActivityWatch as the publisher name. And that's it, if Activity Watch was running, it should detect this vs-code watcher automatically. Give it some time to have some data to display and it should show in the ActivityWatch Timeline and Activity sections soon.
+When multiple VS Code windows are open, only the **focused window** sends heartbeats. This prevents different projects from interleaving in the same bucket, which would break ActivityWatch's pulse merge and produce 0-duration events.
 
-## Commands
+When a window loses focus, one final heartbeat is sent to properly close the current event with correct duration.
 
-#### Reload ActivityWatch
+## Community Contributions Merged
 
-Use this in case VS Code has been started before the AW server.
+- **PR #36** ([@Thopiax](https://github.com/Thopiax)) — workspace name field
+- **PR #39** ([@fooman](https://github.com/fooman)) — editor identification (enhanced to be dynamic)
+- **PR #40** ([@ishanarora](https://github.com/ishanarora)) — untrusted workspace support
 
-## Extension Settings
+## License
 
-This extension adds the following settings:
-
-- `aw-watcher-vscode.maxHeartbeatsPerSec`: Controls the maximum number of heartbeats sent per second.
-<!--
-TODO:
-* `aw-watcher-vscode.enable`: enable/disable this extension
--->
-
-## Error reporting
-
-If you run into any errors or have feature requests, please [open an issue](https://github.com/ActivityWatch/aw-watcher-vscode).
-
-<!--
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
--->
-
-## Release Notes
-
-### 0.5.0
-
- - Updated publisherId to `activitywatch`.
- - Added support for VSCodium.
- - Added support for VSCode remote.
-
-### 0.4.1
-
-Updated aw-client-js, media and npm dependencies.
-
-### 0.4.0
-
-Updated submodules aw-client-js and media to latest
-
-fixed the extension to work with the latest aw-client:
-- AppEditorActivityHeartbeat --> IAppEditorEvent
-- createBucket --> ensureBucket
-- options object in AWClient constructor
-- timestamp should be a Date not a string
-
-### 0.3.3
-
-Fixed security vulnerability of an outdated dependency.
-
-### 0.3.2
-
-Added `maxHeartbeatsPerSec` configuration.
-
-### 0.3.0
-
-Refined error handling and heartbeat logic.
-
-### 0.2.0
-
-Refined error handling and README.
-
-### 0.1.0
-
-Initial release of aw-watcher-vscode.
+[Mozilla Public License 2.0](LICENSE.txt) — same as the original project.
