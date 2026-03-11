@@ -30,32 +30,24 @@ export function activate(context: ExtensionContext) {
   );
   context.subscriptions.push(reloadCommand);
 
+  const MENU_RECONNECT = "$(refresh) Reconnect to ActivityWatch";
+  const MENU_DASHBOARD = "$(globe) Open ActivityWatch Dashboard";
   const statusCommand = commands.registerCommand(
     "aw-watcher-vscode.showMenu",
     async () => {
+      const statusLabel = `$(info) Status: ${controller.getStatus()} — ${controller.getHeartbeatCount()} heartbeats`;
       const pick = await window.showQuickPick(
         [
-          {
-            label: "$(refresh) Reconnect to ActivityWatch",
-            description: "Retry server connection",
-            action: "reload",
-          },
-          {
-            label: "$(globe) Open ActivityWatch Dashboard",
-            description: "http://localhost:5600",
-            action: "dashboard",
-          },
-          {
-            label: `$(info) Status: ${controller.getStatus()}`,
-            description: `${controller.getHeartbeatCount()} heartbeats sent`,
-            action: "none",
-          },
+          { label: MENU_RECONNECT, description: "Retry server connection" },
+          { label: MENU_DASHBOARD, description: "http://localhost:5600" },
+          { label: statusLabel },
         ],
         { placeHolder: "ActivityWatch Enhanced" }
       );
-      if (pick?.action === "reload") {
+      if (!pick) return;
+      if (pick.label === MENU_RECONNECT) {
         controller.init();
-      } else if (pick?.action === "dashboard") {
+      } else if (pick.label === MENU_DASHBOARD) {
         env.openExternal(Uri.parse("http://localhost:5600"));
       }
     }
@@ -91,6 +83,7 @@ class ActivityWatch {
 
   // Cache PID -> cwd for terminals without shellIntegration
   private _pidCwdCache: Map<number, { cwd: string; time: number }> = new Map();
+  private _heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor() {
     this._bucket = {
@@ -143,6 +136,14 @@ class ActivityWatch {
 
     // Window focus events
     window.onDidChangeWindowState(this._onEvent, this, subscriptions);
+
+    // Periodic heartbeat every 5s to build event duration via pulse merge.
+    // Short interval ensures even brief VS Code visits get proper duration.
+    this._heartbeatTimer = setInterval(() => {
+      if (window.state.focused) {
+        this._onEvent();
+      }
+    }, 5000);
 
     this._disposable = Disposable.from(...subscriptions);
   }
@@ -214,6 +215,7 @@ class ActivityWatch {
   }
 
   public dispose() {
+    if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
     this._statusBar.dispose();
     this._disposable.dispose();
   }
@@ -391,10 +393,12 @@ class ActivityWatch {
     const filePath = this._getFilePath();
     const branch = this._getCurrentBranch() || "unknown";
 
+    // When terminal is focused (no active editor), fall back to project/workspace info
+    const isTerminal = !editor && window.activeTerminal;
     const data: Record<string, unknown> = {
-      language: this._getFileLanguage() || "unknown",
+      language: this._getFileLanguage() || (isTerminal ? "terminal" : "unknown"),
       project: projectName || "unknown",
-      file: filePath || "unknown",
+      file: filePath || (projectName ? `${projectName} (terminal)` : "unknown"),
       branch: branch,
       // PR #39: editor identification (dynamic, supports Cursor/Windsurf/etc.)
       editor: env.appName || "VS Code",
